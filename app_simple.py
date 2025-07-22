@@ -18,6 +18,8 @@ from deepface import DeepFace
 import plotly.express as px
 from collections import defaultdict
 import threading
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+import av
 
 # Configuración de la página
 st.set_page_config(
@@ -26,92 +28,146 @@ st.set_page_config(
     layout="wide"
 )
 
-def analyze_frame(frame):
-    """Analiza un frame y devuelve los resultados."""
-    try:
-        # Crear archivo temporal
-        temp_filename = f"temp_frame_{int(time.time() * 1000)}.jpg"
-        temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
-        
-        # Guardar frame
-        cv2.imwrite(temp_path, frame)
-        
-        # Analizar con DeepFace
-        result = DeepFace.analyze(
-            temp_path, 
-            actions=['emotion', 'age', 'gender'],
-            enforce_detection=False
-        )
-        
-        if result and len(result) > 0:
-            analysis = result[0]
-            
-            # Extraer datos
-            emotions = analysis.get('emotion', {})
-            dominant_emotion = max(emotions, key=emotions.get) if emotions else 'neutral'
-            emotion_confidence = emotions.get(dominant_emotion, 0) / 100.0
-            age = analysis.get('age', 25)
-            gender = analysis.get('dominant_gender', 'unknown')
-            
-            # Limpiar archivo temporal
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-            
-            return {
-                'emotion': dominant_emotion,
-                'confidence': emotion_confidence,
-                'age': age,
-                'gender': gender,
-                'all_emotions': emotions
-            }
-    except Exception as e:
-        print(f"Error en análisis: {e}")
-        
-    return None
+# Configuración RTC para WebRTC
+RTC_CONFIGURATION = RTCConfiguration({
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+})
 
-def draw_results_on_frame(frame, results):
-    """Dibuja los resultados en el frame."""
-    if not results:
-        return frame
+class FaceMoodTransformer(VideoTransformerBase):
+    """Transformador de video para análisis en tiempo real con WebRTC."""
     
-    # Detectar rostros
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-    
-    # Mapeo de emociones a emojis y colores
-    emotion_emojis = {
-        'angry': '😠', 'disgust': '🤢', 'fear': '😨',
-        'happy': '😀', 'sad': '😢', 'surprise': '😮', 'neutral': '😐'
-    }
-    
-    colors = {
-        'angry': (0, 0, 255), 'disgust': (0, 255, 0), 'fear': (255, 0, 255),
-        'happy': (0, 255, 255), 'sad': (255, 0, 0), 'surprise': (255, 165, 0),
-        'neutral': (128, 128, 128)
-    }
-    
-    for (x, y, w, h) in faces:
-        emotion = results['emotion']
-        color = colors.get(emotion, (255, 255, 255))
-        emoji = emotion_emojis.get(emotion, '❓')
+    def __init__(self):
+        self.frame_count = 0
+        self.analysis_interval = 30  # Analizar cada 30 frames
+        self.current_results = {
+            'emotion': 'neutral',
+            'age': 25,
+            'gender': 'unknown',
+            'confidence': 0.0
+        }
+        self.emotion_history = []
+        self.lock = threading.Lock()
+        self.last_analysis_time = 0
+        self.analysis_cooldown = 2.0  # 2 segundos entre análisis
         
-        # Dibujar rectángulo alrededor del rostro
-        cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
+        # Mapeo de emociones a emojis
+        self.emotion_emojis = {
+            'angry': '😠', 'disgust': '🤢', 'fear': '😨',
+            'happy': '😀', 'sad': '😢', 'surprise': '😮', 'neutral': '😐'
+        }
         
-        # Agregar texto con emoción
-        text = f"{emoji} {emotion.upper()}"
-        cv2.putText(frame, text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        # Agregar edad y género
-        age_text = f"Age: {results['age']}"
-        gender_text = f"Gender: {results['gender']}"
-        cv2.putText(frame, age_text, (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        cv2.putText(frame, gender_text, (x, y+h+40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        # Colores para emociones (BGR)
+        self.colors = {
+            'angry': (0, 0, 255), 'disgust': (0, 255, 0), 'fear': (255, 0, 255),
+            'happy': (0, 255, 255), 'sad': (255, 0, 0), 'surprise': (255, 165, 0),
+            'neutral': (128, 128, 128)
+        }
     
-    return frame
+    def recv(self, frame):
+        """Procesa cada frame del video."""
+        img = frame.to_ndarray(format="bgr24")
+        current_time = time.time()
+        
+        # Analizar cada cierto número de frames y con cooldown
+        if (self.frame_count % self.analysis_interval == 0 and 
+            current_time - self.last_analysis_time > self.analysis_cooldown):
+            
+            self.last_analysis_time = current_time
+            
+            try:
+                # Crear archivo temporal con nombre único
+                temp_filename = f"temp_frame_{int(current_time * 1000)}.jpg"
+                temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
+                
+                # Guardar frame
+                cv2.imwrite(temp_path, img)
+                
+                # Analizar con DeepFace
+                result = DeepFace.analyze(
+                    temp_path, 
+                    actions=['emotion', 'age', 'gender'],
+                    enforce_detection=False
+                )
+                
+                if result and len(result) > 0:
+                    analysis = result[0]
+                    
+                    # Extraer datos
+                    emotions = analysis.get('emotion', {})
+                    dominant_emotion = max(emotions, key=emotions.get) if emotions else 'neutral'
+                    emotion_confidence = emotions.get(dominant_emotion, 0) / 100.0
+                    age = analysis.get('age', 25)
+                    gender = analysis.get('dominant_gender', 'unknown')
+                    
+                    # Actualizar resultados
+                    with self.lock:
+                        self.current_results = {
+                            'emotion': dominant_emotion,
+                            'confidence': emotion_confidence,
+                            'age': age,
+                            'gender': gender,
+                            'all_emotions': emotions
+                        }
+                        
+                        # Agregar a historial
+                        self.emotion_history.append({
+                            'time': current_time,
+                            'emotion': dominant_emotion,
+                            'confidence': emotion_confidence
+                        })
+                        
+                        # Mantener solo los últimos 50 registros
+                        if len(self.emotion_history) > 50:
+                            self.emotion_history.pop(0)
+                
+                # Limpiar archivo temporal
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                    
+            except Exception as e:
+                print(f"Error en análisis: {e}")
+        
+        self.frame_count += 1
+        
+        # Dibujar resultados en el frame
+        img = self.draw_results_on_frame(img)
+        
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+    
+    def draw_results_on_frame(self, img):
+        """Dibuja los resultados en el frame."""
+        with self.lock:
+            results = self.current_results
+        
+        if not results:
+            return img
+        
+        # Detectar rostros
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        
+        for (x, y, w, h) in faces:
+            emotion = results['emotion']
+            color = self.colors.get(emotion, (255, 255, 255))
+            emoji = self.emotion_emojis.get(emotion, '❓')
+            
+            # Dibujar rectángulo alrededor del rostro
+            cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
+            
+            # Agregar texto con emoción
+            text = f"{emoji} {emotion.upper()}"
+            cv2.putText(img, text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            # Agregar edad y género
+            age_text = f"Age: {results['age']}"
+            gender_text = f"Gender: {results['gender']}"
+            cv2.putText(img, age_text, (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(img, gender_text, (x, y+h+40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        return img
 
 def create_emotion_chart(emotion_history):
     """Crea un gráfico de las emociones detectadas."""
@@ -120,8 +176,8 @@ def create_emotion_chart(emotion_history):
     
     # Contar emociones
     emotion_counts = defaultdict(int)
-    for emotion in emotion_history:
-        emotion_counts[emotion] += 1
+    for entry in emotion_history:
+        emotion_counts[entry['emotion']] += 1
     
     if not emotion_counts:
         return None
@@ -130,7 +186,7 @@ def create_emotion_chart(emotion_history):
     fig = px.bar(
         x=list(emotion_counts.keys()),
         y=list(emotion_counts.values()),
-        title="Emociones Detectadas",
+        title="Emociones Detectadas en Tiempo Real",
         labels={'x': 'Emoción', 'y': 'Frecuencia'},
         color=list(emotion_counts.values()),
         color_continuous_scale='viridis'
@@ -140,8 +196,8 @@ def create_emotion_chart(emotion_history):
     return fig
 
 def main():
-    st.title("🧠 FaceMood AI - Simple")
-    st.markdown("### Detección de emociones en tiempo real - Versión optimizada")
+    st.title("🧠 FaceMood AI - Video en Tiempo Real")
+    st.markdown("### Detección de emociones en video continuo - Análisis automático")
     
     # Inicializar session state
     if 'emotion_history' not in st.session_state:
@@ -150,35 +206,16 @@ def main():
         st.session_state.last_analysis = None
     if 'analysis_count' not in st.session_state:
         st.session_state.analysis_count = 0
-    if 'running' not in st.session_state:
-        st.session_state.running = False
-    if 'last_photo_time' not in st.session_state:
-        st.session_state.last_photo_time = 0
     
     # Sidebar con configuración
     st.sidebar.title("⚙️ Configuración")
     
-    # Configuración de análisis automático
-    auto_analyze = st.sidebar.checkbox(
-        "🔄 Análisis Automático", 
-        value=True,
-        help="Analiza automáticamente cada foto capturada"
-    )
-    
-    analysis_interval = st.sidebar.slider(
-        "⏱️ Intervalo de análisis (segundos)", 
-        min_value=1, 
-        max_value=10, 
-        value=3,
-        help="Tiempo mínimo entre análisis automáticos"
-    )
-    
-    # Información sobre la cámara
+    # Información sobre el video en tiempo real
     st.sidebar.info("""
-    **📹 Cómo usar:**
-    1. Activa "Análisis Automático"
-    2. Haz clic en "Take photo" para capturar
-    3. El análisis se ejecuta automáticamente
+    **📹 Video en Tiempo Real:**
+    1. Haz clic en "START" para activar la cámara
+    2. Permite acceso a tu cámara cuando lo solicite
+    3. El análisis se ejecuta automáticamente cada 2 segundos
     4. Los resultados se muestran en tiempo real
     5. Los gráficos se actualizan automáticamente
     """)
@@ -187,151 +224,104 @@ def main():
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("📹 Cámara Web")
+        st.subheader("📹 Video en Tiempo Real")
         
-        # Usar st.camera_input para captura de fotos
-        camera_photo = st.camera_input(
-            label="Haz clic en 'Take photo' para capturar y analizar automáticamente",
-            help="Captura una foto para analizar emociones, edad y género"
+        # WebRTC Streamer para video continuo
+        webrtc_ctx = webrtc_streamer(
+            key="facemood_realtime",
+            video_transformer_factory=FaceMoodTransformer,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
         )
         
-        # Analizar foto automáticamente cuando se capture
-        if camera_photo is not None:
-            current_time = time.time()
+        if webrtc_ctx.state.playing:
+            st.success("✅ Video activo - Analizando emociones en tiempo real...")
             
-            # Verificar si ha pasado suficiente tiempo desde el último análisis
-            if (auto_analyze and 
-                current_time - st.session_state.last_photo_time > analysis_interval):
+            # Actualizar session state con los resultados del transformador
+            if webrtc_ctx.video_transformer:
+                transformer = webrtc_ctx.video_transformer
                 
-                st.session_state.last_photo_time = current_time
+                with transformer.lock:
+                    results = transformer.current_results
+                    emotion_history = transformer.emotion_history
                 
-                # Convertir la imagen de Streamlit a formato OpenCV
-                bytes_data = camera_photo.getvalue()
-                
-                # Convertir bytes a numpy array
-                nparr = np.frombuffer(bytes_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                # Mostrar que está analizando
-                with st.spinner("🔍 Analizando imagen..."):
-                    # Analizar frame
-                    results = analyze_frame(frame)
-                
-                if results:
+                if results and results['emotion'] != 'neutral':
                     st.session_state.last_analysis = results
                     st.session_state.analysis_count += 1
-                    st.session_state.emotion_history.append(results['emotion'])
-                    
-                    # Mantener solo últimos 50
-                    if len(st.session_state.emotion_history) > 50:
-                        st.session_state.emotion_history.pop(0)
-                    
-                    # Dibujar resultados en frame
-                    frame_with_results = draw_results_on_frame(frame.copy(), results)
-                    
-                    # Convertir BGR a RGB para mostrar
-                    frame_rgb = cv2.cvtColor(frame_with_results, cv2.COLOR_BGR2RGB)
-                    
-                    # Mostrar imagen con resultados
-                    st.image(frame_rgb, caption="Imagen analizada con resultados", use_container_width=True)
-                    
-                    # Mostrar resultado
-                    emotion_emojis = {
-                        'angry': '😠', 'disgust': '🤢', 'fear': '😨',
-                        'happy': '😀', 'sad': '😢', 'surprise': '😮', 'neutral': '😐'
-                    }
-                    emoji = emotion_emojis.get(results['emotion'], '❓')
-                    
-                    st.success(f"✅ Análisis completado: {emoji} {results['emotion'].title()} ({results['confidence']:.1%}) - Edad: {results['age']} - Género: {results['gender']}")
-                    
-                    # Auto-rerun para actualizar gráficos
-                    st.rerun()
-                else:
-                    st.warning("⚠️ No se pudo detectar un rostro en la imagen")
-            elif not auto_analyze:
-                st.info("📸 Foto capturada. Activa 'Análisis Automático' para procesar.")
-            else:
-                st.info(f"⏳ Esperando {analysis_interval - (current_time - st.session_state.last_photo_time):.1f}s para el próximo análisis...")
+                    st.session_state.emotion_history = [entry['emotion'] for entry in emotion_history]
         else:
-            st.info("📱 Haz clic en 'Take photo' para comenzar el análisis")
+            st.info("👆 Haz clic en 'START' para activar el video en tiempo real")
     
     with col2:
         st.subheader("📊 Resultados en Tiempo Real")
         
-        # Mostrar último análisis
-        if st.session_state.last_analysis:
-            results = st.session_state.last_analysis
+        if webrtc_ctx.state.playing and webrtc_ctx.video_transformer:
+            transformer = webrtc_ctx.video_transformer
             
-            # Mapeo de emojis
-            emotion_emojis = {
-                'angry': '😠', 'disgust': '🤢', 'fear': '😨',
-                'happy': '😀', 'sad': '😢', 'surprise': '😮', 'neutral': '😐'
-            }
+            with transformer.lock:
+                results = transformer.current_results
+                emotion_history = transformer.emotion_history
             
-            # Métricas en columnas
-            col_met1, col_met2 = st.columns(2)
-            
-            with col_met1:
-                st.metric("Emoción", 
-                         f"{emotion_emojis.get(results['emotion'], '❓')} {results['emotion'].title()}")
-                st.metric("Confianza", f"{results['confidence']:.1%}")
-            
-            with col_met2:
-                st.metric("Edad", f"{results['age']} años")
-                st.metric("Género", results['gender'].title())
-            
-            st.metric("Análisis Realizados", st.session_state.analysis_count)
-            
-            # Información detallada
-            st.info(f"🎭 **Última emoción**: {emotion_emojis.get(results['emotion'], '❓')} {results['emotion'].title()} ({results['confidence']:.1%})")
-            
-            # Mostrar todas las emociones si están disponibles
-            if 'all_emotions' in results:
-                st.subheader("📈 Todas las Emociones")
-                emotions_data = []
-                for emotion, confidence in results['all_emotions'].items():
-                    emotions_data.append({
-                        'Emoción': emotion.title(),
-                        'Confianza': f"{confidence:.1f}%"
-                    })
-                st.dataframe(emotions_data, use_container_width=True)
-        
-        # Gráfico de emociones
-        st.subheader("📈 Estadísticas")
-        
-        if st.session_state.emotion_history:
-            fig = create_emotion_chart(st.session_state.emotion_history)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
+            # Mostrar resultados actuales
+            if results:
+                emotion = results['emotion']
+                emoji = transformer.emotion_emojis.get(emotion, '❓')
+                
+                st.metric(
+                    label="Emoción Detectada",
+                    value=f"{emoji} {emotion.upper()}",
+                    delta=f"{results['confidence']:.1%} confianza"
+                )
+                
+                st.metric(
+                    label="Edad Estimada",
+                    value=f"{results['age']} años"
+                )
+                
+                st.metric(
+                    label="Género",
+                    value=results['gender'].upper()
+                )
+                
+                st.metric(
+                    label="Análisis Realizados",
+                    value=len(emotion_history)
+                )
+                
+                # Mostrar todas las emociones
+                if 'all_emotions' in results:
+                    st.subheader("📈 Todas las Emociones")
+                    emotions_df = []
+                    for emotion_name, confidence in results['all_emotions'].items():
+                        emotions_df.append({
+                            'Emoción': emotion_name.title(),
+                            'Confianza': f"{confidence:.1f}%"
+                        })
+                    st.dataframe(emotions_df, use_container_width=True)
+                
+                # Gráfico de historial
+                if emotion_history:
+                    st.subheader("📊 Historial de Emociones")
+                    chart = create_emotion_chart(emotion_history)
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True)
+            else:
+                st.info("👀 Esperando detección de rostro...")
         else:
-            st.info("📊 Los gráficos aparecerán cuando se detecten emociones")
-        
-        # Controles
-        st.subheader("🔧 Controles")
-        
-        col_btn1, col_btn2 = st.columns(2)
-        
-        with col_btn1:
-            if st.button("🔄 Resetear Estadísticas"):
-                st.session_state.emotion_history = []
-                st.session_state.last_analysis = None
-                st.session_state.analysis_count = 0
-                st.rerun()
-        
-        with col_btn2:
-            if st.button("📊 Actualizar Gráficos"):
-                st.rerun()
-        
-        # Información
-        st.subheader("ℹ️ Información")
-        st.info(f"""
-        **Estado actual:**
-        - Análisis realizados: {st.session_state.analysis_count}
-        - Emociones en historial: {len(st.session_state.emotion_history)}
-        - Análisis automático: {'✅ Activado' if auto_analyze else '❌ Desactivado'}
-        - Intervalo: {analysis_interval}s
-        - Última actualización: {datetime.now().strftime('%H:%M:%S')}
-        """)
+            st.info("🎥 Activa el video para ver resultados")
+    
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; color: #666;'>
+        <p>🧠 FaceMood AI - Análisis de Video en Tiempo Real</p>
+        <p>💡 Detecta emociones automáticamente mientras cambias expresiones</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main() 
