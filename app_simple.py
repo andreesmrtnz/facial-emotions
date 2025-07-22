@@ -203,33 +203,34 @@ def display_statistics(results, emotion_history, data_source, is_video_active):
     if data_source:
         st.markdown(f"**{data_source}**")
     
-    if results:
-        emotion = results['emotion']
+    # Siempre mostrar estadísticas si hay datos
+    if results and isinstance(results, dict):
+        emotion = results.get('emotion', 'neutral')
         emoji = '😀' if emotion == 'happy' else '😢' if emotion == 'sad' else '😠' if emotion == 'angry' else '😮' if emotion == 'surprise' else '😨' if emotion == 'fear' else '🤢' if emotion == 'disgust' else '😐'
         
         st.metric(
             label="Emoción Detectada",
             value=f"{emoji} {emotion.upper()}",
-            delta=f"{results['confidence']:.1%} confianza"
+            delta=f"{results.get('confidence', 0):.1%} confianza"
         )
         
         st.metric(
             label="Edad Estimada",
-            value=f"{results['age']} años"
+            value=f"{results.get('age', 25)} años"
         )
         
         st.metric(
             label="Género",
-            value=results['gender'].upper()
+            value=results.get('gender', 'unknown').upper()
         )
         
         st.metric(
             label="Análisis Realizados",
-            value=len(emotion_history)
+            value=len(emotion_history) if emotion_history else 0
         )
         
         # Mostrar todas las emociones
-        if 'all_emotions' in results:
+        if 'all_emotions' in results and results['all_emotions']:
             st.subheader("📈 Todas las Emociones")
             emotions_df = []
             for emotion_name, confidence in results['all_emotions'].items():
@@ -244,8 +245,8 @@ def display_statistics(results, emotion_history, data_source, is_video_active):
         else:
             st.info("🎥 No hay datos guardados. Activa el video para comenzar.")
     
-    # Mostrar gráficos
-    if emotion_history:
+    # Mostrar gráficos siempre que haya historial
+    if emotion_history and len(emotion_history) > 0:
         st.subheader(f"📊 Historial de Emociones ({data_source})")
         chart = create_emotion_chart(emotion_history)
         if chart:
@@ -320,8 +321,11 @@ def main():
             st.session_state.video_active = False
             if webrtc_ctx.video_transformer:
                 with webrtc_ctx.video_transformer.lock:
+                    # Guardar resultados actuales
                     if webrtc_ctx.video_transformer.current_results:
                         st.session_state.saved_results = webrtc_ctx.video_transformer.current_results.copy()
+                        st.session_state.saved_results['timestamp'] = time.time()
+                    # Guardar historial de emociones
                     if webrtc_ctx.video_transformer.emotion_history:
                         st.session_state.saved_emotion_history = webrtc_ctx.video_transformer.emotion_history.copy()
             st.info("⏸️ Video detenido - Estadísticas guardadas")
@@ -346,6 +350,12 @@ def main():
             emotion_history = st.session_state.saved_emotion_history
             data_source = "💾 GUARDADO" if results else None
             is_video_active = False
+            
+            # Debug: mostrar información sobre datos guardados
+            if st.session_state.saved_results:
+                st.sidebar.success(f"✅ Datos guardados: {len(st.session_state.saved_emotion_history)} análisis")
+            else:
+                st.sidebar.info("📊 No hay datos guardados")
         
         # Mostrar estadísticas SIEMPRE en el lateral
         display_statistics(results, emotion_history, data_source, is_video_active)
