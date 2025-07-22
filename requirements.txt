@@ -1,0 +1,6 @@
+opencv-python==4.8.1.78
+deepface==0.0.93
+tensorflow==2.19.0
+tf-keras==2.19.0
+matplotlib==3.7.2
+numpy==2.1.3 
