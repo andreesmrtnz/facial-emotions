@@ -199,9 +199,13 @@ def main():
     st.title("🧠 FaceMood AI - Video en Tiempo Real")
     st.markdown("### Detección de emociones en video continuo - Análisis automático")
     
-    # Inicializar session state
-    if 'emotion_history' not in st.session_state:
-        st.session_state.emotion_history = []
+    # Inicializar session state para persistencia de datos
+    if 'saved_results' not in st.session_state:
+        st.session_state.saved_results = None
+    if 'saved_emotion_history' not in st.session_state:
+        st.session_state.saved_emotion_history = []
+    if 'video_active' not in st.session_state:
+        st.session_state.video_active = False
     if 'last_analysis' not in st.session_state:
         st.session_state.last_analysis = None
     if 'analysis_count' not in st.session_state:
@@ -217,8 +221,16 @@ def main():
     2. Permite acceso a tu cámara cuando lo solicite
     3. El análisis se ejecuta automáticamente cada 2 segundos
     4. Los resultados se muestran en tiempo real
-    5. Los gráficos se actualizan automáticamente
+    5. Al dar "STOP" las estadísticas se guardan
+    6. Los gráficos permanecen hasta el siguiente "START"
     """)
+    
+    # Botón para limpiar estadísticas guardadas
+    if st.sidebar.button("🗑️ Limpiar Estadísticas Guardadas"):
+        st.session_state.saved_results = None
+        st.session_state.saved_emotion_history = []
+        st.session_state.video_active = False
+        st.rerun()
     
     # Layout principal
     col1, col2 = st.columns([2, 1])
@@ -235,7 +247,24 @@ def main():
             async_processing=True,
         )
         
-        if webrtc_ctx.state.playing:
+        # Detectar cambios en el estado del video
+        current_video_state = webrtc_ctx.state.playing
+        
+        if current_video_state and not st.session_state.video_active:
+            # Video se acaba de activar
+            st.session_state.video_active = True
+            st.success("✅ Video activo - Analizando emociones en tiempo real...")
+        elif not current_video_state and st.session_state.video_active:
+            # Video se acaba de detener - guardar estadísticas
+            st.session_state.video_active = False
+            if webrtc_ctx.video_transformer:
+                with webrtc_ctx.video_transformer.lock:
+                    if webrtc_ctx.video_transformer.current_results:
+                        st.session_state.saved_results = webrtc_ctx.video_transformer.current_results.copy()
+                    if webrtc_ctx.video_transformer.emotion_history:
+                        st.session_state.saved_emotion_history = webrtc_ctx.video_transformer.emotion_history.copy()
+            st.info("⏸️ Video detenido - Estadísticas guardadas")
+        elif current_video_state:
             st.success("✅ Video activo - Analizando emociones en tiempo real...")
         else:
             st.info("👆 Haz clic en 'START' para activar el video en tiempo real")
@@ -249,69 +278,80 @@ def main():
         # Contenedor para gráficos que se actualiza automáticamente
         chart_container = st.container()
         
+        # Determinar qué datos mostrar
         if webrtc_ctx.state.playing and webrtc_ctx.video_transformer:
+            # Video activo - usar datos en tiempo real
             transformer = webrtc_ctx.video_transformer
-            
             with transformer.lock:
                 results = transformer.current_results
                 emotion_history = transformer.emotion_history
-            
-            # Mostrar resultados actuales en el contenedor de métricas
-            with metrics_container:
-                if results:
-                    emotion = results['emotion']
-                    emoji = transformer.emotion_emojis.get(emotion, '❓')
-                    
-                    st.metric(
-                        label="Emoción Detectada",
-                        value=f"{emoji} {emotion.upper()}",
-                        delta=f"{results['confidence']:.1%} confianza"
-                    )
-                    
-                    st.metric(
-                        label="Edad Estimada",
-                        value=f"{results['age']} años"
-                    )
-                    
-                    st.metric(
-                        label="Género",
-                        value=results['gender'].upper()
-                    )
-                    
-                    st.metric(
-                        label="Análisis Realizados",
-                        value=len(emotion_history)
-                    )
-                    
-                    # Mostrar todas las emociones
-                    if 'all_emotions' in results:
-                        st.subheader("📈 Todas las Emociones")
-                        emotions_df = []
-                        for emotion_name, confidence in results['all_emotions'].items():
-                            emotions_df.append({
-                                'Emoción': emotion_name.title(),
-                                'Confianza': f"{confidence:.1f}%"
-                            })
-                        st.dataframe(emotions_df, use_container_width=True)
-                else:
-                    st.info("👀 Esperando detección de rostro...")
-            
-            # Mostrar gráficos en el contenedor de gráficos
-            with chart_container:
-                if emotion_history:
-                    st.subheader("📊 Historial de Emociones")
-                    chart = create_emotion_chart(emotion_history)
-                    if chart:
-                        st.plotly_chart(chart, use_container_width=True)
-                else:
-                    st.info("📊 Los gráficos aparecerán cuando se detecten emociones")
+            data_source = "🔄 EN VIVO"
         else:
-            with metrics_container:
-                st.info("🎥 Activa el video para ver resultados")
-            with chart_container:
-                st.info("📊 Los gráficos aparecerán cuando actives el video")
+            # Video detenido - usar datos guardados
+            results = st.session_state.saved_results
+            emotion_history = st.session_state.saved_emotion_history
+            data_source = "💾 GUARDADO"
+        
+        # Mostrar resultados actuales en el contenedor de métricas
+        with metrics_container:
+            if results:
+                emotion = results['emotion']
+                emoji = '😀' if emotion == 'happy' else '😢' if emotion == 'sad' else '😠' if emotion == 'angry' else '😮' if emotion == 'surprise' else '😨' if emotion == 'fear' else '🤢' if emotion == 'disgust' else '😐'
+                
+                # Mostrar fuente de datos
+                st.markdown(f"**{data_source}**")
+                
+                st.metric(
+                    label="Emoción Detectada",
+                    value=f"{emoji} {emotion.upper()}",
+                    delta=f"{results['confidence']:.1%} confianza"
+                )
+                
+                st.metric(
+                    label="Edad Estimada",
+                    value=f"{results['age']} años"
+                )
+                
+                st.metric(
+                    label="Género",
+                    value=results['gender'].upper()
+                )
+                
+                st.metric(
+                    label="Análisis Realizados",
+                    value=len(emotion_history)
+                )
+                
+                # Mostrar todas las emociones
+                if 'all_emotions' in results:
+                    st.subheader("📈 Todas las Emociones")
+                    emotions_df = []
+                    for emotion_name, confidence in results['all_emotions'].items():
+                        emotions_df.append({
+                            'Emoción': emotion_name.title(),
+                            'Confianza': f"{confidence:.1f}%"
+                        })
+                    st.dataframe(emotions_df, use_container_width=True)
+            else:
+                if webrtc_ctx.state.playing:
+                    st.info("👀 Esperando detección de rostro...")
+                else:
+                    st.info("🎥 No hay datos guardados. Activa el video para comenzar.")
+        
+        # Mostrar gráficos en el contenedor de gráficos
+        with chart_container:
+            if emotion_history:
+                st.subheader(f"📊 Historial de Emociones ({data_source})")
+                chart = create_emotion_chart(emotion_history)
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
+            else:
+                if webrtc_ctx.state.playing:
+                    st.info("📊 Los gráficos aparecerán cuando se detecten emociones")
+                else:
+                    st.info("📊 No hay historial guardado. Activa el video para generar datos.")
     
-    # Auto-refresh para actualizar estadísticas en tiempo real
+    # Auto-refresh para actualizar estadísticas en tiempo real (solo cuando video activo)
     if webrtc_ctx.state.playing:
         # Refrescar cada 3 segundos cuando el video está activo
         time.sleep(3)
@@ -325,6 +365,7 @@ def main():
         <p>🧠 FaceMood AI - Análisis de Video en Tiempo Real</p>
         <p>💡 Detecta emociones automáticamente mientras cambias expresiones</p>
         <p>📊 Estadísticas actualizadas automáticamente cada 3 segundos</p>
+        <p>💾 Los datos se guardan al detener el video</p>
         </div>
         """,
         unsafe_allow_html=True
