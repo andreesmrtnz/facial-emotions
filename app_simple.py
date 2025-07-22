@@ -150,17 +150,37 @@ def main():
         st.session_state.last_analysis = None
     if 'analysis_count' not in st.session_state:
         st.session_state.analysis_count = 0
+    if 'running' not in st.session_state:
+        st.session_state.running = False
+    if 'last_photo_time' not in st.session_state:
+        st.session_state.last_photo_time = 0
     
     # Sidebar con configuración
     st.sidebar.title("⚙️ Configuración")
     
+    # Configuración de análisis automático
+    auto_analyze = st.sidebar.checkbox(
+        "🔄 Análisis Automático", 
+        value=True,
+        help="Analiza automáticamente cada foto capturada"
+    )
+    
+    analysis_interval = st.sidebar.slider(
+        "⏱️ Intervalo de análisis (segundos)", 
+        min_value=1, 
+        max_value=10, 
+        value=3,
+        help="Tiempo mínimo entre análisis automáticos"
+    )
+    
     # Información sobre la cámara
     st.sidebar.info("""
-    **📹 Cómo usar la cámara:**
-    1. Haz clic en "Take photo" para capturar
-    2. La imagen se analizará automáticamente
-    3. Repite para análisis continuo
+    **📹 Cómo usar:**
+    1. Activa "Análisis Automático"
+    2. Haz clic en "Take photo" para capturar
+    3. El análisis se ejecuta automáticamente
     4. Los resultados se muestran en tiempo real
+    5. Los gráficos se actualizan automáticamente
     """)
     
     # Layout principal
@@ -171,43 +191,67 @@ def main():
         
         # Usar st.camera_input para captura de fotos
         camera_photo = st.camera_input(
-            label="Haz clic en 'Take photo' para capturar y analizar",
+            label="Haz clic en 'Take photo' para capturar y analizar automáticamente",
             help="Captura una foto para analizar emociones, edad y género"
         )
         
-        # Analizar foto cuando se capture
+        # Analizar foto automáticamente cuando se capture
         if camera_photo is not None:
-            # Convertir la imagen de Streamlit a formato OpenCV
-            bytes_data = camera_photo.getvalue()
+            current_time = time.time()
             
-            # Convertir bytes a numpy array
-            nparr = np.frombuffer(bytes_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            # Analizar frame
-            results = analyze_frame(frame)
-            
-            if results:
-                st.session_state.last_analysis = results
-                st.session_state.analysis_count += 1
-                st.session_state.emotion_history.append(results['emotion'])
+            # Verificar si ha pasado suficiente tiempo desde el último análisis
+            if (auto_analyze and 
+                current_time - st.session_state.last_photo_time > analysis_interval):
                 
-                # Mantener solo últimos 30
-                if len(st.session_state.emotion_history) > 30:
-                    st.session_state.emotion_history.pop(0)
+                st.session_state.last_photo_time = current_time
                 
-                # Dibujar resultados en frame
-                frame_with_results = draw_results_on_frame(frame.copy(), results)
+                # Convertir la imagen de Streamlit a formato OpenCV
+                bytes_data = camera_photo.getvalue()
                 
-                # Convertir BGR a RGB para mostrar
-                frame_rgb = cv2.cvtColor(frame_with_results, cv2.COLOR_BGR2RGB)
+                # Convertir bytes a numpy array
+                nparr = np.frombuffer(bytes_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
-                # Mostrar imagen con resultados
-                st.image(frame_rgb, caption="Imagen analizada con resultados", use_container_width=True)
+                # Mostrar que está analizando
+                with st.spinner("🔍 Analizando imagen..."):
+                    # Analizar frame
+                    results = analyze_frame(frame)
                 
-                st.success(f"✅ Análisis completado: {results['emotion'].title()} ({results['confidence']:.1%})")
+                if results:
+                    st.session_state.last_analysis = results
+                    st.session_state.analysis_count += 1
+                    st.session_state.emotion_history.append(results['emotion'])
+                    
+                    # Mantener solo últimos 50
+                    if len(st.session_state.emotion_history) > 50:
+                        st.session_state.emotion_history.pop(0)
+                    
+                    # Dibujar resultados en frame
+                    frame_with_results = draw_results_on_frame(frame.copy(), results)
+                    
+                    # Convertir BGR a RGB para mostrar
+                    frame_rgb = cv2.cvtColor(frame_with_results, cv2.COLOR_BGR2RGB)
+                    
+                    # Mostrar imagen con resultados
+                    st.image(frame_rgb, caption="Imagen analizada con resultados", use_container_width=True)
+                    
+                    # Mostrar resultado
+                    emotion_emojis = {
+                        'angry': '😠', 'disgust': '🤢', 'fear': '😨',
+                        'happy': '😀', 'sad': '😢', 'surprise': '😮', 'neutral': '😐'
+                    }
+                    emoji = emotion_emojis.get(results['emotion'], '❓')
+                    
+                    st.success(f"✅ Análisis completado: {emoji} {results['emotion'].title()} ({results['confidence']:.1%}) - Edad: {results['age']} - Género: {results['gender']}")
+                    
+                    # Auto-rerun para actualizar gráficos
+                    st.rerun()
+                else:
+                    st.warning("⚠️ No se pudo detectar un rostro en la imagen")
+            elif not auto_analyze:
+                st.info("📸 Foto capturada. Activa 'Análisis Automático' para procesar.")
             else:
-                st.warning("⚠️ No se pudo detectar un rostro en la imagen")
+                st.info(f"⏳ Esperando {analysis_interval - (current_time - st.session_state.last_photo_time):.1f}s para el próximo análisis...")
         else:
             st.info("📱 Haz clic en 'Take photo' para comenzar el análisis")
     
@@ -265,11 +309,18 @@ def main():
         # Controles
         st.subheader("🔧 Controles")
         
-        if st.button("🔄 Resetear Estadísticas"):
-            st.session_state.emotion_history = []
-            st.session_state.last_analysis = None
-            st.session_state.analysis_count = 0
-            st.rerun()
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if st.button("🔄 Resetear Estadísticas"):
+                st.session_state.emotion_history = []
+                st.session_state.last_analysis = None
+                st.session_state.analysis_count = 0
+                st.rerun()
+        
+        with col_btn2:
+            if st.button("📊 Actualizar Gráficos"):
+                st.rerun()
         
         # Información
         st.subheader("ℹ️ Información")
@@ -277,6 +328,8 @@ def main():
         **Estado actual:**
         - Análisis realizados: {st.session_state.analysis_count}
         - Emociones en historial: {len(st.session_state.emotion_history)}
+        - Análisis automático: {'✅ Activado' if auto_analyze else '❌ Desactivado'}
+        - Intervalo: {analysis_interval}s
         - Última actualización: {datetime.now().strftime('%H:%M:%S')}
         """)
 
