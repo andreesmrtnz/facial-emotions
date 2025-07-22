@@ -195,6 +195,67 @@ def create_emotion_chart(emotion_history):
     fig.update_layout(showlegend=False, height=400, margin=dict(l=20, r=20, t=40, b=20))
     return fig
 
+def display_statistics(results, emotion_history, data_source, is_video_active):
+    """Muestra las estadísticas en el lateral derecho."""
+    st.subheader("📊 Resultados en Tiempo Real")
+    
+    # Mostrar fuente de datos
+    if data_source:
+        st.markdown(f"**{data_source}**")
+    
+    if results:
+        emotion = results['emotion']
+        emoji = '😀' if emotion == 'happy' else '😢' if emotion == 'sad' else '😠' if emotion == 'angry' else '😮' if emotion == 'surprise' else '😨' if emotion == 'fear' else '🤢' if emotion == 'disgust' else '😐'
+        
+        st.metric(
+            label="Emoción Detectada",
+            value=f"{emoji} {emotion.upper()}",
+            delta=f"{results['confidence']:.1%} confianza"
+        )
+        
+        st.metric(
+            label="Edad Estimada",
+            value=f"{results['age']} años"
+        )
+        
+        st.metric(
+            label="Género",
+            value=results['gender'].upper()
+        )
+        
+        st.metric(
+            label="Análisis Realizados",
+            value=len(emotion_history)
+        )
+        
+        # Mostrar todas las emociones
+        if 'all_emotions' in results:
+            st.subheader("📈 Todas las Emociones")
+            emotions_df = []
+            for emotion_name, confidence in results['all_emotions'].items():
+                emotions_df.append({
+                    'Emoción': emotion_name.title(),
+                    'Confianza': f"{confidence:.1f}%"
+                })
+            st.dataframe(emotions_df, use_container_width=True)
+    else:
+        if is_video_active:
+            st.info("👀 Esperando detección de rostro...")
+        else:
+            st.info("🎥 No hay datos guardados. Activa el video para comenzar.")
+    
+    # Mostrar gráficos
+    if emotion_history:
+        st.subheader(f"📊 Historial de Emociones ({data_source})")
+        chart = create_emotion_chart(emotion_history)
+        if chart:
+            st.plotly_chart(chart, use_container_width=True)
+    else:
+        if is_video_active:
+            st.info("📊 Los gráficos aparecerán cuando se detecten emociones")
+        else:
+            st.info("📊 No hay historial guardado. Activa el video para generar datos.")
+
 def main():
     st.title("🧠 FaceMood AI - Video en Tiempo Real")
     st.markdown("### Detección de emociones en video continuo - Análisis automático")
@@ -270,14 +331,6 @@ def main():
             st.info("👆 Haz clic en 'START' para activar el video en tiempo real")
     
     with col2:
-        st.subheader("📊 Resultados en Tiempo Real")
-        
-        # Contenedor para métricas que se actualiza automáticamente
-        metrics_container = st.container()
-        
-        # Contenedor para gráficos que se actualiza automáticamente
-        chart_container = st.container()
-        
         # Determinar qué datos mostrar
         if webrtc_ctx.state.playing and webrtc_ctx.video_transformer:
             # Video activo - usar datos en tiempo real
@@ -286,70 +339,16 @@ def main():
                 results = transformer.current_results
                 emotion_history = transformer.emotion_history
             data_source = "🔄 EN VIVO"
+            is_video_active = True
         else:
             # Video detenido - usar datos guardados
             results = st.session_state.saved_results
             emotion_history = st.session_state.saved_emotion_history
-            data_source = "💾 GUARDADO"
+            data_source = "💾 GUARDADO" if results else None
+            is_video_active = False
         
-        # Mostrar resultados actuales en el contenedor de métricas
-        with metrics_container:
-            if results:
-                emotion = results['emotion']
-                emoji = '😀' if emotion == 'happy' else '😢' if emotion == 'sad' else '😠' if emotion == 'angry' else '😮' if emotion == 'surprise' else '😨' if emotion == 'fear' else '🤢' if emotion == 'disgust' else '😐'
-                
-                # Mostrar fuente de datos
-                st.markdown(f"**{data_source}**")
-                
-                st.metric(
-                    label="Emoción Detectada",
-                    value=f"{emoji} {emotion.upper()}",
-                    delta=f"{results['confidence']:.1%} confianza"
-                )
-                
-                st.metric(
-                    label="Edad Estimada",
-                    value=f"{results['age']} años"
-                )
-                
-                st.metric(
-                    label="Género",
-                    value=results['gender'].upper()
-                )
-                
-                st.metric(
-                    label="Análisis Realizados",
-                    value=len(emotion_history)
-                )
-                
-                # Mostrar todas las emociones
-                if 'all_emotions' in results:
-                    st.subheader("📈 Todas las Emociones")
-                    emotions_df = []
-                    for emotion_name, confidence in results['all_emotions'].items():
-                        emotions_df.append({
-                            'Emoción': emotion_name.title(),
-                            'Confianza': f"{confidence:.1f}%"
-                        })
-                    st.dataframe(emotions_df, use_container_width=True)
-            else:
-                if webrtc_ctx.state.playing:
-                    st.info("👀 Esperando detección de rostro...")
-                else:
-                    st.info("🎥 No hay datos guardados. Activa el video para comenzar.")
-        
-        # Mostrar gráficos en el contenedor de gráficos
-        with chart_container:
-            if emotion_history:
-                st.subheader(f"📊 Historial de Emociones ({data_source})")
-                chart = create_emotion_chart(emotion_history)
-                if chart:
-                    st.plotly_chart(chart, use_container_width=True)
-            else:
-                if webrtc_ctx.state.playing:
-                    st.info("📊 Los gráficos aparecerán cuando se detecten emociones")
-                else:
-                    st.info("📊 No hay historial guardado. Activa el video para generar datos.")
+        # Mostrar estadísticas SIEMPRE en el lateral
+        display_statistics(results, emotion_history, data_source, is_video_active)
     
     # Auto-refresh para actualizar estadísticas en tiempo real (solo cuando video activo)
     if webrtc_ctx.state.playing:
@@ -366,6 +365,7 @@ def main():
         <p>💡 Detecta emociones automáticamente mientras cambias expresiones</p>
         <p>📊 Estadísticas actualizadas automáticamente cada 3 segundos</p>
         <p>💾 Los datos se guardan al detener el video</p>
+        <p>📱 Estadísticas siempre visibles en el lateral derecho</p>
         </div>
         """,
         unsafe_allow_html=True
