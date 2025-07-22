@@ -98,53 +98,42 @@ def draw_results_on_frame(frame, results):
         color = colors.get(emotion, (255, 255, 255))
         emoji = emotion_emojis.get(emotion, '❓')
         
-        # Dibujar rectángulo
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
+        # Dibujar rectángulo alrededor del rostro
+        cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
         
-        # Preparar texto
-        emotion_text = f"{emoji} {emotion.upper()}"
-        age_gender_text = f"Age: {results['age']} | {results['gender'].title()}"
-        confidence_text = f"Conf: {results['confidence']:.2f}"
+        # Agregar texto con emoción
+        text = f"{emoji} {emotion.upper()}"
+        cv2.putText(frame, text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         
-        # Configurar fuente
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
-        
-        # Obtener tamaños de texto
-        (emotion_width, emotion_height), _ = cv2.getTextSize(emotion_text, font, font_scale, thickness)
-        (age_width, age_height), _ = cv2.getTextSize(age_gender_text, font, 0.5, 1)
-        
-        # Dibujar fondo
-        cv2.rectangle(frame, (x, y - emotion_height - 80), (x + max(emotion_width, age_width) + 15, y), color, -1)
-        
-        # Dibujar textos
-        cv2.putText(frame, emotion_text, (x + 5, y - 55), font, font_scale, (255, 255, 255), thickness)
-        cv2.putText(frame, age_gender_text, (x + 5, y - 35), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(frame, confidence_text, (x + 5, y - 15), font, 0.5, (255, 255, 255), 1)
+        # Agregar edad y género
+        age_text = f"Age: {results['age']}"
+        gender_text = f"Gender: {results['gender']}"
+        cv2.putText(frame, age_text, (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.putText(frame, gender_text, (x, y+h+40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     
     return frame
 
 def create_emotion_chart(emotion_history):
-    """Crea gráfico de emociones."""
+    """Crea un gráfico de las emociones detectadas."""
     if not emotion_history:
         return None
     
+    # Contar emociones
     emotion_counts = defaultdict(int)
     for emotion in emotion_history:
         emotion_counts[emotion] += 1
     
+    if not emotion_counts:
+        return None
+    
+    # Crear gráfico
     fig = px.bar(
         x=list(emotion_counts.keys()),
         y=list(emotion_counts.values()),
-        title="Evolución de Emociones",
-        labels={'x': 'Emociones', 'y': 'Frecuencia'},
-        color=list(emotion_counts.keys()),
-        color_discrete_map={
-            'angry': '#FF0000', 'disgust': '#00FF00', 'fear': '#FF00FF',
-            'happy': '#FFFF00', 'sad': '#0000FF', 'surprise': '#FFA500',
-            'neutral': '#808080'
-        }
+        title="Emociones Detectadas",
+        labels={'x': 'Emoción', 'y': 'Frecuencia'},
+        color=list(emotion_counts.values()),
+        color_continuous_scale='viridis'
     )
     
     fig.update_layout(showlegend=False, height=400, margin=dict(l=20, r=20, t=40, b=20))
@@ -161,27 +150,18 @@ def main():
         st.session_state.last_analysis = None
     if 'analysis_count' not in st.session_state:
         st.session_state.analysis_count = 0
-    if 'running' not in st.session_state:
-        st.session_state.running = False
     
     # Sidebar con configuración
     st.sidebar.title("⚙️ Configuración")
-    analysis_interval = st.sidebar.slider(
-        "Frecuencia de análisis (frames)", 
-        min_value=10, 
-        max_value=50, 
-        value=15,
-        help="Menor valor = más frecuente (pero más lento)"
-    )
     
-    cooldown_time = st.sidebar.slider(
-        "Tiempo entre análisis (segundos)", 
-        min_value=1.0, 
-        max_value=5.0, 
-        value=1.5,
-        step=0.5,
-        help="Menor valor = más análisis por minuto"
-    )
+    # Información sobre la cámara
+    st.sidebar.info("""
+    **📹 Cómo usar la cámara:**
+    1. Haz clic en "Take photo" para capturar
+    2. La imagen se analizará automáticamente
+    3. Repite para análisis continuo
+    4. Los resultados se muestran en tiempo real
+    """)
     
     # Layout principal
     col1, col2 = st.columns([2, 1])
@@ -189,83 +169,47 @@ def main():
     with col1:
         st.subheader("📹 Cámara Web")
         
-        # Placeholder para la imagen
-        image_placeholder = st.empty()
+        # Usar st.camera_input para captura de fotos
+        camera_photo = st.camera_input(
+            label="Haz clic en 'Take photo' para capturar y analizar",
+            help="Captura una foto para analizar emociones, edad y género"
+        )
         
-        # Controles
-        start_button = st.button("🎥 Iniciar Cámara", type="primary")
-        stop_button = st.button("⏹️ Detener")
-        
-        if start_button:
-            st.session_state.running = True
-        
-        if stop_button:
-            st.session_state.running = False
-        
-        # Mostrar estado
-        if st.session_state.running:
-            st.success("✅ Cámara activa - Analizando emociones...")
-        else:
-            st.info("📱 Presiona 'Iniciar Cámara' para comenzar")
-        
-        # Captura de video
-        if st.session_state.running:
-            cap = cv2.VideoCapture(0)
+        # Analizar foto cuando se capture
+        if camera_photo is not None:
+            # Convertir la imagen de Streamlit a formato OpenCV
+            bytes_data = camera_photo.getvalue()
             
-            if cap.isOpened():
-                # Configurar análisis
-                frame_count = 0
-                last_analysis_time = 0
-                current_results = None
+            # Convertir bytes a numpy array
+            nparr = np.frombuffer(bytes_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            # Analizar frame
+            results = analyze_frame(frame)
+            
+            if results:
+                st.session_state.last_analysis = results
+                st.session_state.analysis_count += 1
+                st.session_state.emotion_history.append(results['emotion'])
                 
-                # Loop principal
-                while st.session_state.running:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    
-                    # Voltear frame
-                    frame = cv2.flip(frame, 1)
-                    
-                    # Analizar cada cierto número de frames (MEJORADO)
-                    current_time = time.time()
-                    if (frame_count % analysis_interval == 0 and 
-                        current_time - last_analysis_time > cooldown_time):
-                        
-                        # Analizar frame
-                        results = analyze_frame(frame)
-                        if results:
-                            current_results = results
-                            st.session_state.last_analysis = results
-                            st.session_state.analysis_count += 1
-                            st.session_state.emotion_history.append(results['emotion'])
-                            
-                            # Mantener solo últimos 30 (aumentado)
-                            if len(st.session_state.emotion_history) > 30:
-                                st.session_state.emotion_history.pop(0)
-                            
-                            last_analysis_time = current_time
-                            print(f"🎭 Emoción: {results['emotion']} ({results['confidence']:.2f}) - Edad: {results['age']} - Género: {results['gender']}")
-                    
-                    # Dibujar resultados en frame
-                    if current_results:
-                        frame = draw_results_on_frame(frame, current_results)
-                    
-                    # Convertir BGR a RGB para Streamlit
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Mostrar frame (CORREGIDO: use_container_width)
-                    image_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-                    
-                    frame_count += 1
-                    
-                    # Control de FPS mejorado
-                    time.sleep(0.025)  # ~40 FPS
+                # Mantener solo últimos 30
+                if len(st.session_state.emotion_history) > 30:
+                    st.session_state.emotion_history.pop(0)
                 
-                cap.release()
+                # Dibujar resultados en frame
+                frame_with_results = draw_results_on_frame(frame.copy(), results)
+                
+                # Convertir BGR a RGB para mostrar
+                frame_rgb = cv2.cvtColor(frame_with_results, cv2.COLOR_BGR2RGB)
+                
+                # Mostrar imagen con resultados
+                st.image(frame_rgb, caption="Imagen analizada con resultados", use_container_width=True)
+                
+                st.success(f"✅ Análisis completado: {results['emotion'].title()} ({results['confidence']:.1%})")
             else:
-                st.error("❌ No se pudo acceder a la cámara")
-                st.session_state.running = False
+                st.warning("⚠️ No se pudo detectar un rostro en la imagen")
+        else:
+            st.info("📱 Haz clic en 'Take photo' para comenzar el análisis")
     
     with col2:
         st.subheader("📊 Resultados en Tiempo Real")
@@ -296,6 +240,17 @@ def main():
             
             # Información detallada
             st.info(f"🎭 **Última emoción**: {emotion_emojis.get(results['emotion'], '❓')} {results['emotion'].title()} ({results['confidence']:.1%})")
+            
+            # Mostrar todas las emociones si están disponibles
+            if 'all_emotions' in results:
+                st.subheader("📈 Todas las Emociones")
+                emotions_data = []
+                for emotion, confidence in results['all_emotions'].items():
+                    emotions_data.append({
+                        'Emoción': emotion.title(),
+                        'Confianza': f"{confidence:.1f}%"
+                    })
+                st.dataframe(emotions_data, use_container_width=True)
         
         # Gráfico de emociones
         st.subheader("📈 Estadísticas")
@@ -303,7 +258,6 @@ def main():
         if st.session_state.emotion_history:
             fig = create_emotion_chart(st.session_state.emotion_history)
             if fig:
-                # CORREGIDO: use_container_width en lugar de use_column_width
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("📊 Los gráficos aparecerán cuando se detecten emociones")
@@ -320,11 +274,10 @@ def main():
         # Información
         st.subheader("ℹ️ Información")
         st.info(f"""
-        **Configuración actual:**
-        - Análisis cada {analysis_interval} frames
-        - Cooldown: {cooldown_time}s entre análisis
-        - Cámara a ~40 FPS
-        - Actualización en tiempo real
+        **Estado actual:**
+        - Análisis realizados: {st.session_state.analysis_count}
+        - Emociones en historial: {len(st.session_state.emotion_history)}
+        - Última actualización: {datetime.now().strftime('%H:%M:%S')}
         """)
 
 if __name__ == "__main__":
